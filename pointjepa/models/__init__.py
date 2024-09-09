@@ -1,3 +1,3 @@
 from .classification import PointJepaClassification
-from .part_segmentation import PointJepaPartSegmentation
+from .part_segmentation import PointJepaPartSegmentation, PointJepaEncoder
 from .point_jepa import PointJepa

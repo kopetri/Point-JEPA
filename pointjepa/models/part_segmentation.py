@@ -340,3 +340,64 @@ class PointJepaPartSegmentation(pl.LightningModule):
     def categorical_label(self, label: torch.Tensor) -> torch.Tensor:
         # label: (B,)
         return torch.eye(self.num_classes, device=label.device)[label]
+    
+class PointJepaEncoder(pl.LightningModule):
+    def __init__(
+        self,
+        tokenizer_num_groups: int = 128,
+        tokenizer_group_size: int = 32,
+        tokenizer_group_radius: float | None = None,
+        encoder_dim: int = 384,
+        encoder_depth: int = 12,
+        encoder_heads: int = 6,
+        encoder_dropout: float = 0,
+        encoder_attention_dropout: float = 0,
+        encoder_drop_path_rate: float = 0.2,
+        encoder_add_pos_at_every_layer: bool = True,
+        seg_head_fetch_layers: List[int] = [3, 7, 11],
+    ) -> None:
+        super().__init__()
+
+        self.tokenizer = PointcloudTokenizer(
+            num_groups=tokenizer_num_groups,
+            group_size=tokenizer_group_size,
+            group_radius=tokenizer_group_radius,
+            token_dim=encoder_dim,
+        )
+
+        self.positional_encoding = nn.Sequential(
+            nn.Linear(3, 128),
+            nn.GELU(),
+            nn.Linear(128, encoder_dim),
+        )
+
+        dpr = [
+            x.item() for x in torch.linspace(0, encoder_drop_path_rate, encoder_depth)
+        ]
+        self.encoder = TransformerEncoder(
+            embed_dim=encoder_dim,
+            depth=encoder_depth,
+            num_heads=encoder_heads,
+            qkv_bias=True,
+            drop_rate=encoder_dropout,
+            attn_drop_rate=encoder_attention_dropout,
+            drop_path_rate=dpr,
+            add_pos_at_every_layer=encoder_add_pos_at_every_layer,
+        )
+        
+        point_dim = 3
+        upsampling_dim = 384
+        self.upsampling = PointNetFeatureUpsampling(in_channel=encoder_dim + point_dim, mlp=[upsampling_dim, upsampling_dim])  # type: ignore
+        self.seg_head_fetch_layers = seg_head_fetch_layers
+
+    def forward(self, points: torch.Tensor) -> torch.Tensor:
+        # points: (B, N, 3)
+        tokens, centers = self.tokenizer(points)  # (B, T, C), (B, T, 3)
+        pos_embeddings = self.positional_encoding(centers)
+        output: TransformerEncoderOutput = self.encoder(
+            tokens, pos_embeddings, return_hidden_states=True
+        )
+        hidden_states = [F.layer_norm((output.hidden_states[i]), output.hidden_states[i].shape[-1:]) for i in self.seg_head_fetch_layers]  # type: ignore [(B, T, C)]
+        token_features = torch.stack(hidden_states, dim=0).mean(0)  # (B, T, C)
+        x = self.upsampling(points, centers, points, token_features)  # (B, N, C)
+        return x
